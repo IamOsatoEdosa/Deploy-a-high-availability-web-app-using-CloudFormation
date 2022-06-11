@@ -1,0 +1,161 @@
+Description: >
+    Osato Edosa
+    This template will deploy the servers needed to run the Ugagram application. It will spin up Server Instances,
+    Security and Auto-Scaling Groups, Launch configuration, Load balancer, e.t.c.
+Parameters:
+
+    ApplicationName:
+        Description: The name of the project which the template provisons resources for. Will prefix the name of created resources.
+        Type: String
+    InstanceType:
+        Description: Instance type of servers to be spun up.
+        Type: String
+    ImageID:
+        Description: The ID of the Image AMI of the server instances.
+        Type: String 
+      
+
+Resources:
+  #Servers, Security roles and Software Deployment.
+  RoleForS3BucketAccess:  
+      Type: AWS::IAM::Role
+      Properties: 
+        AssumeRolePolicyDocument: 
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service:
+                  - ec2.amazonaws.com
+              Action:
+                - 'sts:AssumeRole'
+        Description: IAM Role to allow EC2 Instance to Access S3 Bucket
+        ManagedPolicyArns: 
+              - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+  AppInstanceProfile:
+      Type: AWS::IAM::InstanceProfile
+      Properties: 
+          Roles: 
+            - !Ref RoleForS3BucketAccess
+  LBSecGroup:
+      Type: AWS::EC2::SecurityGroup
+      Properties:
+          GroupDescription: Allow http to our load balancer
+          VpcId:
+            Fn::ImportValue:
+                !Sub ${ApplicationName}-VPC-ID
+          SecurityGroupIngress:
+            - IpProtocol: tcp
+              FromPort: 80
+              ToPort: 80
+              CidrIp: 0.0.0.0/0
+          SecurityGroupEgress:
+            - IpProtocol: tcp
+              FromPort: 80
+              ToPort: 80
+              CidrIp: 0.0.0.0/0
+  AppServerSecGroup:
+      Type: AWS::EC2::SecurityGroup
+      Properties:
+          GroupDescription: Allow http to our hosts
+          VpcId:
+              Fn::ImportValue:
+                !Sub ${ApplicationName}-VPC-ID
+          SecurityGroupIngress:
+            - IpProtocol: tcp
+              FromPort: 80
+              ToPort: 80
+              CidrIp: 0.0.0.0/0
+          SecurityGroupEgress:
+            - IpProtocol: tcp
+              FromPort: 0
+              ToPort: 65535
+              CidrIp: 0.0.0.0/0
+  AppLB:
+        Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+        Properties:
+            Subnets:
+                - Fn::ImportValue: !Sub ${ApplicationName}-PUB-SN1
+                - Fn::ImportValue: !Sub ${ApplicationName}-PUB-SN2
+            SecurityGroups:
+            - Ref: LBSecGroup
+  LBListener:
+        Type: AWS::ElasticLoadBalancingV2::Listener
+        Properties:
+            DefaultActions:
+            - Type: forward
+              TargetGroupArn:
+                Ref: AppTargetGroup
+            LoadBalancerArn:
+                Ref: AppLB
+            Port: '80'
+            Protocol: HTTP
+  LBListenerRule:
+        Type: AWS::ElasticLoadBalancingV2::ListenerRule
+        Properties:
+            Actions:
+            - Type: forward
+              TargetGroupArn: !Ref 'AppTargetGroup'
+            Conditions:
+            - Field: path-pattern
+              Values: [/]
+            ListenerArn: !Ref 'LBListener'
+            Priority: 1
+  AppTargetGroup:
+      Type: AWS::ElasticLoadBalancingV2::TargetGroup
+      Properties:
+          HealthCheckIntervalSeconds: 12
+          HealthCheckPath: /
+          HealthCheckProtocol: HTTP
+          HealthCheckTimeoutSeconds: 10
+          HealthyThresholdCount: 2
+          Port: 80
+          Protocol: HTTP
+          UnhealthyThresholdCount: 5
+          VpcId:
+            Fn::ImportValue: !Sub ${ApplicationName}-VPC-ID
+  AppLaunchConfig:
+          Type: AWS::AutoScaling::LaunchConfiguration
+          Properties:
+              UserData:
+                Fn::Base64: !Sub |
+                  #!/bin/bash
+                  apt-get update -y
+                  apt-get install apache2 -y
+                  systemctl start apache2.service
+                  cd /var/www/html
+                  echo "it works! Udagram, Udacity." > index.html
+              ImageId: !Ref ImageID
+              SecurityGroups:
+                - Ref: AppServerSecGroup
+              InstanceType: !Ref InstanceType
+              IamInstanceProfile: !Ref AppInstanceProfile
+              BlockDeviceMappings:
+                - DeviceName: "/dev/sdk"
+                  Ebs:
+                    VolumeSize: '12'
+  AppGroup:
+        Type: AWS::AutoScaling::AutoScalingGroup
+        Properties:
+            VPCZoneIdentifier:
+              - Fn::ImportValue: 
+                  !Sub ${ApplicationName}-Pub-SNETS
+            LaunchConfigurationName:
+                Ref: AppLaunchConfig
+            MinSize: '4'
+            MaxSize: '4'
+            TargetGroupARNs:
+            - Ref: AppTargetGroup
+
+Outputs:
+  AppLoadBalancer:
+      Description: Detail of the application Load Balancer
+      Value: !Ref AppLB
+      Export:
+        Name: !Sub ${ApplicationName}-LB-ID
+
+  AppLoadBalancerURL:
+      Description: The Public URL of the Load Balancer servng the website.
+      Value: !Join [ "", [ "http://", !GetAtt AppLB.DNSName ]]
+      Export:
+        Name: !Sub ${ApplicationName}-LB-URL
